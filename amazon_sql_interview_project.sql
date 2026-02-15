@@ -417,6 +417,8 @@ WHere last_month_orders > 0.2 * total_orders;
 -- ==========================================================
 
 -- 15. Agent login/logout Hours
+
+Select * from agent_logs;
 SELECT 
     agent_id,
     DATE(login_time) AS activity_date,
@@ -425,7 +427,7 @@ SELECT
         THEN TIMESTAMPDIFF(SECOND, login_time, logout_time) / 3600.0
         
         ELSE TIMESTAMPDIFF(SECOND, login_time, 
-                DATE_ADD(DATE(login_time), INTERVAL 1 DAY)) / 3600.0
+                DATE_ADD(DATE(login_time), INTERVAL 1 DAY)) / 3600.0 # this part strips the time and add i day so it will be midnight 
     END AS online_hours
 FROM agent_logs
 
@@ -435,7 +437,7 @@ SELECT
     agent_id,
     DATE(logout_time) AS activity_date,
     TIMESTAMPDIFF(SECOND,
-        DATE(logout_time),
+        DATE(logout_time), # time is stripped 
         logout_time) / 3600.0 AS online_hours
 FROM agent_logs
 WHERE DATE(login_time) <> DATE(logout_time);
