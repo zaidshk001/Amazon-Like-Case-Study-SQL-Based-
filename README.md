@@ -89,5 +89,3 @@ This repository demonstrates:
 - Interview-level SQL problem solving
 
 It reflects preparation for Data Analyst / Business Intelligence / Product Analyst roles.
-
----
