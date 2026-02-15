@@ -164,15 +164,280 @@ INSERT INTO agent_logs VALUES
 -- ==========================================================
 
 -- 1. Customers who purchased on exactly 3 days last month
--- 2. Top selling product per category
--- 3. Product-level anomaly detection
--- 4. Employees above department average
--- 5. Median salary per department
--- 6. Customers who purchased from all categories
--- 7. Cumulative sales above store average
--- 8. Monthly store ranking
--- 9. Moving 5-day average per product
--- 10. Agent login/logout midnight split logic
 
--- (Queries intentionally omitted here to keep script clean.
--- They can be stored in a separate analytical_queries.sql file.)
+# Method 1
+Select Max(Order_date) as last_order_date From orders;
+SELECT customer_id
+FROM purchases
+WHERE MONTH(purchase_date) = MONTH('2026-02-05' - INTERVAL 1 MONTH)
+  AND YEAR(purchase_date) = YEAR('2026-02-05'- INTERVAL 1 MONTH)
+GROUP BY customer_id
+HAVING COUNT(DISTINCT purchase_date) = 3;   -- this is less efficient as functions are used in the WHere Clause and index is not happening 
+
+# Method 2
+WITH last_month_purchases AS (
+    SELECT 
+        customer_id,
+        purchase_date
+    FROM purchases
+    WHERE purchase_date BETWEEN 
+          DATE_FORMAT(DATE_SUB('2026-02-05', INTERVAL 1 MONTH), '%Y-%m-01')
+      AND LAST_DAY(DATE_SUB('2026-02-05', INTERVAL 1 MONTH))
+)
+
+SELECT customer_id
+FROM last_month_purchases
+GROUP BY customer_id
+HAVING COUNT(DISTINCT purchase_date) = 3;
+
+-- ==========================================================
+
+-- 2. Top selling product per category
+
+WITH product_sales AS (
+    SELECT 
+        p.category,
+        p.product_name,
+        SUM(s.sale_amount) AS total_sales
+    FROM products p
+    LEFT JOIN sales s 
+        ON s.product_id = p.product_id
+    GROUP BY p.category, p.product_name
+)
+
+SELECT *
+FROM (
+    SELECT *,
+           ROW_NUMBER() OVER (
+               PARTITION BY category 
+               ORDER BY total_sales DESC
+           ) AS rank_1
+    FROM product_sales
+) ranked
+WHERE rank_1 = 1;
+
+-- ==========================================================
+
+-- 3. Product-level anomaly detection
+
+# Method 1
+Select * from sales;
+SELECT *
+FROM (
+    SELECT *,
+           AVG(sale_amount) OVER (PARTITION BY product_id) AS avg_sale
+    FROM sales
+) t
+WHERE sale_amount < avg_sale;
+
+# Method 2
+Select     sale_id,
+    product_id,
+    sale_amount,
+    Case 
+    When sale_amount < AVG(sale_amount) over (partition by product_id) Then "Anamoly" Else "Good" End as status
+    From sales;
+
+-- ==========================================================
+
+-- 4. Find employees who have never been a manager and worked in more than 1 department
+
+With cte as (
+Select * From employees Where employee_id NOT IN (
+Select  DISTINCT
+m.employee_id
+From employees e
+JOIN employees m
+On e.manager_id = m.employee_id)) 
+
+Select employee_id, name
+From cte
+Group by 1,2
+Having COunt(Distinct department_id) > 1;
+
+# Method 2  No need to self join
+
+SELECT employee_id, name
+FROM employees
+WHERE employee_id NOT IN (
+        SELECT DISTINCT manager_id
+        FROM employees
+        WHERE manager_id IS NOT NULL
+)
+GROUP BY employee_id, name
+HAVING COUNT(DISTINCT department_id) > 1;
+
+-- ==========================================================
+
+-- 5. Median salary per department
+
+with cte as (
+Select department_id, salary, Row_number() Over (Partition by department_id Order BY Salary) as rnk,
+COUNT(*) over (partition by department_id) as cnt
+  From employees)
+  
+Select department_id, Avg(salary) as median_salary
+From cte
+Where rnk IN (FLoor(cnt+1)/2, CEIL(cnt+1)/2)
+Group by 1;
+
+-- ==========================================================
+
+-- 6. Customers who purchased from all categories
+
+Select customer_id
+From purchases p
+Left Join products pr
+ON p.product_id = pr.product_id
+Group by 1
+Having COunt(distinct category) = (Select COUNT(distinct category) from products);
+
+-- ==========================================================
+
+-- 7. Calculate the cumulative sales for each store but only include dates where the daily sales exceeded the stores average daily sales 
+
+with cte as(
+Select store_id,
+sale_date,
+sum(sale_amount) as daily_rev
+From sales
+Group by 1,2),
+
+cte2 AS (
+Select *,
+AVG(daily_rev) OVER (PARTITION BY store_id) as avg_daily_rev From cte)
+
+Select
+store_id, sale_date, daily_rev,
+SUM(daily_rev) over (partition by store_id Order by sale_date) as cum_rev
+From cte2
+Where daily_rev > avg_daily_rev;
+
+-- ==========================================================
+
+-- 8. list employees earning more than dept avg
+
+with cte1 as (
+Select department_id, AVG(salary) as dept_avg From employees Group by 1)
+
+Select employee_id from employees e
+Join cte1 c on e.department_id = c.department_id
+Where salary > dept_avg;
+
+# method 2
+SELECT employee_id
+FROM (
+    SELECT 
+        employee_id,
+        salary,
+        AVG(salary) OVER (PARTITION BY department_id) AS dept_avg
+    FROM employees
+) t
+WHERE salary > dept_avg;
+
+-- ==========================================================
+
+-- 9. identify products that have been sold but have no records in the product table and also calculate how many times each missing product have been sold 
+    
+Select s.product_id, COUNT(*) as cnt 
+from sales s Left JOIN products p on s.product_id = p.product_id 
+Where p.product_id is NULL 
+Group by 1;
+
+-- ==========================================================
+
+-- 10. Identifies suppliers whose average delivery time is less than 2 days but only consider deliveries with quantities greater than 100 units
+
+SELECT 
+    supplier_id
+FROM deliveries
+WHERE quantity > 100
+GROUP BY supplier_id
+HAVING AVG(DATEDIFF(delivery_date, order_date)) < 2;
+
+-- ==========================================================
+
+-- 11. find customers who made no purchases last month but made at least one purchase prior to that
+
+Select * from purchases;
+
+# first find out customers who made purchase last month
+
+Select Distinct customer_id From purchases Where customer_id NOT IN (
+Select customer_id
+From purchases
+Where purchase_date Between date_format(date_add('2026-02-15', Interval -1 Month), '%Y-%m-01') 
+AND Last_day(date_add('2026-02-15', Interval -1 Month))
+)
+ANd customer_id IN (purchase_date < date_format(date_add('2026-02-15', Interval -1 Month), '%Y-%m-01') ); # this ANd filters to month prior to last month
+
+-- ==========================================================
+
+-- 12. Calculate the moving average of sales for each product over a 5 day window 
+
+Select * from sales;
+
+Select product_id, sale_date,
+AVG(sale_amount) OVER (Partition by product_id Order BY sale_date Rows Between 4 preceding and current row) as moving_avg
+From sales
+Order by 1,2;
+
+-- ==========================================================
+
+-- 13. rank stores by their monthly sales performance 
+
+Select * from sales;
+with cte as (
+Select store_id, Year(sale_date) as year, 
+Month(sale_date) as month,
+SUM(sale_amount) as total_sales
+From sales
+Group by 1,2,3)
+
+Select
+*,
+DENSE_RANK() OVER (partition by year, month Order by total_sales Desc) as rnk
+from cte;
+
+-- ==========================================================
+
+-- 14. Find customers who place more than 20% of orders last month 
+
+Select customer_id, COUNT(*) from purchases Group by 1 ;
+
+with total_orders as (
+Select customer_id, COUNT(*) as total_orders,
+SUM(CASE WHEN purchase_date Between date_format(date_add('2026-02-15', Interval -1 Month), '%Y-%m-01') 
+AND Last_day(date_add('2026-02-15', Interval -1 Month)) Then 1 ELse 0 ENd) as last_month_orders
+From purchases
+Group by 1)
+Select * from total_orders
+WHere last_month_orders > 0.2 * total_orders;
+
+-- ==========================================================
+
+-- 15. Agent login/logout Hours
+SELECT 
+    agent_id,
+    DATE(login_time) AS activity_date,
+    CASE 
+        WHEN DATE(login_time) = DATE(logout_time)
+        THEN TIMESTAMPDIFF(SECOND, login_time, logout_time) / 3600.0
+        
+        ELSE TIMESTAMPDIFF(SECOND, login_time, 
+                DATE_ADD(DATE(login_time), INTERVAL 1 DAY)) / 3600.0
+    END AS online_hours
+FROM agent_logs
+
+UNION ALL
+
+SELECT 
+    agent_id,
+    DATE(logout_time) AS activity_date,
+    TIMESTAMPDIFF(SECOND,
+        DATE(logout_time),
+        logout_time) / 3600.0 AS online_hours
+FROM agent_logs
+WHERE DATE(login_time) <> DATE(logout_time);
+
+-- ==========================================================
